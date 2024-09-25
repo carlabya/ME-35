@@ -32,8 +32,6 @@ class Human:
                 self.neo.write()
                 await asyncio.sleep(0.01)
 
-                # add yellow when close 
-
             for i in range(255, 0, -1):
                 self.neo[0] = (i, 0, 0) if self.infected else (0, i, 0)
                 self.neo.write()
