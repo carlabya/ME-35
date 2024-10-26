@@ -1,0 +1,35 @@
+from machine import Pin, SoftI2C, PWM
+import ssd1306
+import time
+
+class MusicalInstrument:
+    def __init__(self):
+        self.i2c = SoftI2C(scl=Pin(7), sda=Pin(6))
+        self.screen = ssd1306.SSD1306_I2C(128, 64, self.i2c)
+
+        self.buzzer = PWM(Pin(2))
+
+       
+        self.notes_buttons = [262, 294, 330, 349, 392, 440, 494]
+
+        self.buttons = [Pin(pin, Pin.IN, Pin.PULL_UP) for pin in (4, 5, 21, 10, 9, 8, 20)]
+
+    def play_note_frequency(self, note, duration=0.5):
+        self.buzzer.freq(note)
+        self.buzzer.duty_u16(1000)
+        time.sleep(duration)
+        self.buzzer.duty_u16(0)
+
+    def check_buttons_and_play_notes(self):
+        for i, button in enumerate(self.buttons):
+            if not button.value():  # Button pressed
+                self.play_note_frequency(self.notes_buttons[i])
+                print(f"Button {i + 1} pressed")
+
+    def main_loop(self):
+        while True:
+            self.check_buttons_and_play_notes()
+            time.sleep(0.1)  # Small delay to debounce button press
+
+instrument = MusicalInstrument()
+instrument.main_loop()
