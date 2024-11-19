@@ -1,14 +1,10 @@
 import sensor
 import time
 import math
-from machine import Pin
-import sensor
-import machine
-import bluetooth
-from micropython import const
 import struct
-import network
-from machine import LED
+import bluetooth
+import asyncio
+from micropython import const
 
 # Initialize the camera
 sensor.reset()
@@ -19,15 +15,22 @@ sensor.set_auto_gain(False)  # must turn this off to prevent image washout...
 sensor.set_auto_whitebal(False)  # must turn this off to prevent image washout...
 clock = time.clock()
 
+# Camera calibration values
+f_x = (2.8 / 3.984) * 160  # find_apriltags defaults to this if not set
+f_y = (2.8 / 2.952) * 120  # find_apriltags defaults to this if not set
+c_x = 160 * 0.5  # find_apriltags defaults to this if not set (the image.w * 0.5)
+c_y = 120 * 0.5  # find_apriltags defaults to this if not set (the image.h * 0.5)
+
+def degrees(radians):
+    return (180 * radians) / math.pi
+
 # Constants for BLE events
 _IRQ_CENTRAL_CONNECT = const(1)
 _IRQ_CENTRAL_DISCONNECT = const(2)
 _IRQ_GATTS_WRITE = const(3)
 
 _FLAG_READ = const(0x0002)
-_FLAG_WRITE = const(0x0008)
 _FLAG_NOTIFY = const(0x0010)
-_FLAG_INDICATE = const(0x0020)
 
 # BLE Service and Characteristic UUIDs
 _SERVICE_UUID = bluetooth.UUID(0x1815)
@@ -40,10 +43,11 @@ class BLEMotor:
         self._ble.active(True)
         self._ble.irq(self._irq)
         handles = self._ble.gatts_register_services((_MOTOR_SERVICE,))
-        self._handle = handles[0][0]  # Correct way to get the first handle
+        self._handle = handles[0][0]
         self._connections = set()
         self._payload = advertising_payload(name=name, services=[_SERVICE_UUID])
         self._advertise()
+        self.completed = False  # Track when a "completed" message is received
 
     def _irq(self, event, data):
         if event == _IRQ_CENTRAL_CONNECT:
@@ -54,7 +58,11 @@ class BLEMotor:
             self._connections.remove(conn_handle)
             self._advertise()
         elif event == _IRQ_GATTS_WRITE:
-            pass  # Handle any incoming writes if needed
+            conn_handle, value_handle = data
+            value = self._ble.gatts_read(value_handle).decode().strip()
+            print(f"Received message: {value}")
+            if value == "completed":
+                self.completed = True  # Set flag when "completed" message is received
 
     def _advertise(self, interval_us=500000):
         self._ble.gap_advertise(interval_us, adv_data=self._payload)
@@ -63,10 +71,25 @@ class BLEMotor:
         for conn_handle in self._connections:
             try:
                 msg = str(direction)
-                print("notifying with message: ", msg)
+                print("Notifying with message:", msg)
                 self._ble.gatts_notify(conn_handle, self._handle, msg)
             except Exception as e:
                 print(f"Error notifying: {e}")
+
+    def _process_received_message(self, message):
+
+            # Handle the received message
+
+            if message == "complete":
+                print("Reset command received.")
+                self.completed = False  # Reset the flag
+            elif message.startswith("calibrate:"):
+                params = message.split(":")[1]
+                print(f"Calibrating with params: {params}")
+            else:
+                print(f"Unhandled message: {message}")
+
+
 
 
 def advertising_payload(limited_disc=False, br_edr=False, name=None, services=None):
@@ -76,64 +99,70 @@ def advertising_payload(limited_disc=False, br_edr=False, name=None, services=No
         nonlocal payload
         payload += bytes((len(value) + 1, adv_type)) + value
 
-    # Flags
     flags = (0x02 if limited_disc else 0x06) + (0x00 if br_edr else 0x04)
     _append(0x01, struct.pack("B", flags))
 
-    # Name
     if name:
         _append(0x09, name.encode())
 
-    # Services (UUIDs)
     if services:
         for uuid in services:
-            if isinstance(uuid, bluetooth.UUID):
-                uuid_bytes = bytes(uuid)
-                if len(uuid_bytes) == 2:  # 16-bit UUID
-                    _append(0x03, uuid_bytes)
-                elif len(uuid_bytes) == 16:  # 128-bit UUID
-                    _append(0x07, uuid_bytes)
+            uuid_bytes = bytes(uuid)
+            if len(uuid_bytes) == 2:
+                _append(0x03, uuid_bytes)
+            elif len(uuid_bytes) == 16:
+                _append(0x07, uuid_bytes)
 
     return payload
 
 
+
+# Initialize BLE
 ble = bluetooth.BLE()
 motor_ble = BLEMotor(ble)
 
+# Allow time for Bluetooth devices to connect
+print("Waiting for BLE connection...")
+time.sleep(8)  # Delay to ensure connection
+
+
+
+
+# Main loop
 while True:
     clock.tick()
     img = sensor.snapshot()
-    direction = ""
-    # Check for detected AprilTags
-    for tag in img.find_apriltags():
+    detected_tags = []
+
+    # Detect and sort AprilTags
+    for tag in img.find_apriltags():  # defaults to TAG36H11
         img.draw_rectangle(tag.rect, color=(255, 0, 0))
         img.draw_cross(tag.cx, tag.cy, color=(0, 255, 0))
-        x = str(tag.id)
-        y = float(180 * tag.rotation)/math.pi
-        print(y)
+        detected_tags.append((tag.id, tag.y_translation, tag.rotation))
+    detected_tags.sort(key=lambda t: t[1], reverse=True)
+
+    # Process detected tags into directions
+    movement_instructions = []
+    for tag_id, _, rotation in detected_tags:
+        rotation_deg = degrees(rotation)
+        if tag_id == 1 and 0 <= rotation_deg <= 180:
+            movement_instructions.append("Right")
+        elif tag_id == 1 and 181 <= rotation_deg <= 359:
+            movement_instructions.append("Left")
+        elif tag_id == 0 and 0 <= rotation_deg <= 160:
+            movement_instructions.append("Up")
+        elif tag_id == 0 and 161 <= rotation_deg <= 300:
+            movement_instructions.append("Down")
+
+    # If there are instructions, notify once with the full set
+    if movement_instructions:
+        instructions_str = ",".join(movement_instructions)  # Create a single string
+        motor_ble.notify(instructions_str)  # Send the string
+        print(f"Sent instructions: {instructions_str}")
 
 
-        if x == "0" and 0 <= y <= 180:
-            direction = "Right"
-        elif x == "0" and 181 <= y <= 350:
-            direction = "Left"
-        elif x == "1" and 0 <= y <= 160:
-            direction = "Up"
-        elif x == "1" and 161 <= y <= 300:
-            direction = "Down"
+        # Wait for "completed" before sending new instructions
+        while motor_ble.completed == False:
+            time.sleep(.1)
 
-        motor_ble.notify(direction) #Notifies the pico the direction the children choose
-
-#        time.sleep(3) #sleep function to not overload the pico
-
-
-
-
-
-
-
-
-
-
-
-
+        motor_ble.completed = False  # Reset the flag for the next cycle
