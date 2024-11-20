@@ -50,12 +50,15 @@ class BLECentral:
             neo = neopixel.NeoPixel(Pin(28),1)
             neo[0] = on
             neo.write()
+            print(f"Connection handle assigned: {self._conn_handle}")
             print("Connected")
             self._conn_handle = conn_handle
             self._ble.gattc_discover_services(conn_handle)
+           
 
             
         elif event == _IRQ_PERIPHERAL_DISCONNECT:
+
             conn_handle, _, _ = data
             neo = neopixel.NeoPixel(Pin(28),1)
             neo[0] = off
@@ -68,16 +71,20 @@ class BLECentral:
             conn_handle, value_handle, notify_data = data
             decoded_data = bytes(notify_data).decode()
             print("Received data:", decoded_data)
+            self.send_message("completed")
             self.execute_motor_instructions(decoded_data)
         elif event == _IRQ_GATTC_WRITE_DONE:
             conn_handle, value_handle, status = data
             print("Write complete")
         elif event == _IRQ_GATTC_SERVICE_DISCOVER:
             conn_handle, char_handle, char_uuid = data
+            print(f"Discovered characteristic: UUID={char_uuid}, Handle={char_handle}")
+
             if char_uuid == _MOTOR_SPEED_CHAR_UUID:
                 self._motor_speed_handle = char_handle
-                print(f"Found Motor Speed Characteristic: {char_handle}")
+                print(f"Motor Speed Handle Set: {char_handle}")
                 self.subscribe_to_motor_speed(conn_handle, char_handle)
+                print(f"Subscribing to notifications for handle: {char_handle}")
 
     def start_scan(self):
         print("Scanning for BLE devices...")
@@ -104,41 +111,44 @@ class BLECentral:
     def execute_motor_instructions(self, instructions):
         # Parse instructions
         try:
-            directions = instructions.split(",")  # Assuming "Right,Left" format
+            directions = instructions.split(",")  
             for direction in directions:
                 direction = direction.strip()  # Remove extra spaces
                 if direction == "Up":
                     print("Moving Up")
-                    up_down_motor.duty_u16(50000)  # Example PWM signal
+                    up_down_motor.duty_u16(50000)  
                     time.sleep(1)
                     up_down_motor.duty_u16(0)
                 elif direction == "Down":
                     print("Moving Down")
-                    up_down_motor.duty_u16(30000)  # Example PWM signal
+                    up_down_motor.duty_u16(30000)  
                     time.sleep(1)
                     up_down_motor.duty_u16(0)
                 elif direction == "Right":
                     print("Moving Right")
-                    left_right_motor.duty_u16(50000)  # Example PWM signal
+                    left_right_motor.duty_u16(50000)  
                     time.sleep(1)
                     left_right_motor.duty_u16(0)
                 elif direction == "Left":
                     print("Moving Left")
-                    left_right_motor.duty_u16(30000)  # Example PWM signal
+                    left_right_motor.duty_u16(30000)  
                     time.sleep(1)
                     left_right_motor.duty_u16(0)
-            # Task complete, send a "completed" message
+            # send a "completed" message to 
             self.send_message("completed")
             # print("Message Sent Back")
         except Exception as e:
             print("Error processing instructions:", e)
+    
 
     def send_message(self, message):
-        print(self._conn_handle)
-        print(self._motor_speed_handle)
-        if self._conn_handle and self._motor_speed_handle:
-            self._ble.gattc_write(self._conn_handle, self._motor_speed_handle, message.encode(), 1)
-            print(f"Sent message: {message}")
+        if self._conn_handle is not None and self._motor_speed_handle is not None:
+            try:
+                self._ble.gattc_write(self._conn_handle, self._motor_speed_handle, message.encode(), 0)
+                print(f"Sent message: {message}")
+            except Exception as e:
+                print(f"Error sending message: {e}")
+    
 
 
 # Initialize BLECentral
