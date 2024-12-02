@@ -2,14 +2,15 @@ import time
 import bluetooth
 import struct
 import machine
-from machine import Pin, Timer
+from machine import Pin, Timer, ADC, PWM
 import neopixel
 import utime
 from micropython import const
 
 # Neopixel Configs
-on = (10,0,10)
-off = (0,0,0)
+on = (10, 0, 10)
+off = (0, 0, 0)
+alert = (0, 255, 0)  # Red for magnetic detection
 
 # BLE event constants
 _IRQ_SCAN_RESULT = const(5)
@@ -27,6 +28,9 @@ _MOTOR_SPEED_CHAR_UUID = 0x2A56
 _FLAG_READ = const(0x0002)
 _FLAG_NOTIFY = const(0x0010)
 
+# Threshold for magnetic detection (tune based on Hall sensor and magnet strength)
+MAGNETIC_FIELD_THRESHOLD = 1
+
 class BLECentral:
     def __init__(self):
         self._ble = bluetooth.BLE()
@@ -34,48 +38,63 @@ class BLECentral:
         self._ble.irq(self._irq)
         self._conn_handle = None
         self._motor_speed_handle = None
+
+        # Motor Pins
         self.dir_pin = Pin(16, Pin.OUT)
         self.step_pin = Pin(17, Pin.OUT)
         self.wheeldir_pin = Pin(2, Pin.OUT)
         self.wheelstep_pin = Pin(3, Pin.OUT)
         self.steps_per_revolution = 1000
-        # Initialize timer
+
+        # Hall Effect Sensor
+        self.hall_sensor = Pin(26, machine.Pin.IN, machine.Pin.PULL_UP) # Pin reading from hall sensor
+
+        # Buzzer and NeoPixel
+        self.buzzer = PWM(Pin(18, Pin.OUT)) # Pin connected to the buzzer
+        self.buzzer.freq(500)
+        self.neo = neopixel.NeoPixel(Pin(28), 1)  # Pin for NeoPixel LED
+
+        # Timer for motor stepping
         self.tim = Timer()
 
-    def spoolstep(self,t):
+    def spoolstep(self, t):
         self.step_pin.value(not self.step_pin.value())
-    def wheelstep(self,t):
+
+    def wheelstep(self, t):
         self.wheelstep_pin.value(not self.wheelstep_pin.value())
-    def rotate_spoolmotor(self,delay):
-        # Set up timer for stepping
-        self.tim.init(freq=1000000//delay, mode=Timer.PERIODIC, callback=self.spoolstep)
-    def rotate_wheelmotor(self,delay):
-        # Set up timer for stepping
-        self.tim.init(freq=1000000//delay, mode=Timer.PERIODIC, callback=self.wheelstep)
+
+    def rotate_spoolmotor(self, delay):
+        self.tim.init(freq=1000000 // delay, mode=Timer.PERIODIC, callback=self.spoolstep)
+
+    def rotate_wheelmotor(self, delay):
+        self.tim.init(freq=1000000 // delay, mode=Timer.PERIODIC, callback=self.wheelstep)
 
     def right(self):
         self.wheeldir_pin.value(0)
         self.rotate_wheelmotor(1000)
         utime.sleep_ms(self.steps_per_revolution)
-        self.tim.deinit()  # stop the timer
+        self.tim.deinit()
         utime.sleep(1)
+
     def left(self):
         self.wheeldir_pin.value(1)
         self.rotate_wheelmotor(1000)
         utime.sleep_ms(self.steps_per_revolution)
-        self.tim.deinit()  # stop the timer
+        self.tim.deinit()
         utime.sleep(1)
+
     def up(self):
         self.dir_pin.value(1)
         self.rotate_spoolmotor(1000)
         utime.sleep_ms(self.steps_per_revolution)
-        self.tim.deinit()  # stop the timer
+        self.tim.deinit()
         utime.sleep(1)
+
     def down(self):
         self.dir_pin.value(0)
         self.rotate_spoolmotor(1000)
         utime.sleep_ms(self.steps_per_revolution)
-        self.tim.deinit()  # stop the timer
+        self.tim.deinit()
         utime.sleep(1)
 
     def _irq(self, event, data):
@@ -85,57 +104,25 @@ class BLECentral:
                 print("Found Motor Controller!")
                 self._ble.gap_scan(None)
                 self._ble.gap_connect(addr_type, addr)
-        elif event == _IRQ_SCAN_COMPLETE:
-            print("Scan complete")
         elif event == _IRQ_PERIPHERAL_CONNECT:
             conn_handle, addr_type, addr = data
-            neo = neopixel.NeoPixel(Pin(28),1)
-            neo[0] = on
-            neo.write()
-            print(f"Connection handle assigned: {self._conn_handle}")
+            self.neo[0] = on
+            self.neo.write()
             print("Connected")
             self._conn_handle = conn_handle
             self._ble.gattc_discover_services(conn_handle)
-           
-
-            
         elif event == _IRQ_PERIPHERAL_DISCONNECT:
-
-            conn_handle, _, _ = data
-            neo = neopixel.NeoPixel(Pin(28),1)
-            neo[0] = off
-            neo.write()
+            self.neo[0] = off
+            self.neo.write()
             print("Disconnected")
             self._conn_handle = None
             self._motor_speed_handle = None
             self.start_scan()
-        elif event == _IRQ_GATTC_NOTIFY: 
+        elif event == _IRQ_GATTC_NOTIFY:
             conn_handle, value_handle, notify_data = data
             decoded_data = bytes(notify_data).decode()
             print("Received data:", decoded_data)
-            # self.send_message("completed")
             self.execute_motor_instructions(decoded_data)
-        elif event == _IRQ_GATTC_WRITE_DONE:
-            conn_handle, value_handle, status = data
-            print("Write complete")
-        elif event == _IRQ_GATTC_SERVICE_DISCOVER:
-            conn_handle, char_handle, char_uuid = data
-            print(f"Discovered characteristic: UUID={char_uuid}, Handle={char_handle}")
-
-            if char_uuid == _MOTOR_SPEED_CHAR_UUID:
-                self._motor_speed_handle = char_handle
-                print(f"Motor Speed Handle Set: {char_handle}")
-                self.subscribe_to_motor_speed(conn_handle, char_handle)
-                print(f"Subscribing to notifications for handle: {char_handle}")
-
-    def notify(self, direction):
-        
-            try:
-                msg = str(direction)
-                print("Notifying with message:", msg)
-                self._ble.gatts_notify(64, 21, msg)
-            except Exception as e:
-                print(f"Error notifying: {e}")
 
     def start_scan(self):
         print("Scanning for BLE devices...")
@@ -149,57 +136,42 @@ class BLECentral:
                 break
             ad_type = adv_data[i + 1]
             if ad_type == 0x03:
-                uuid16 = struct.unpack("<H", adv_data[i + 2 : i + length + 1])[0]
+                uuid16 = struct.unpack("<H", adv_data[i + 2: i + length + 1])[0]
                 if uuid16 == service_uuid:
                     return True
             i += length + 1
         return False
 
-    def subscribe_to_motor_speed(self, conn_handle, char_handle):
-        self._motor_speed_handle = char_handle
-        self._ble.gattc_write(conn_handle, char_handle, b'\x01\x00', 1)
-
     def execute_motor_instructions(self, instructions):
-        # Parse instructions
         try:
-            directions = instructions.split(",")  
+            directions = instructions.split(",")
             for direction in directions:
-                direction = direction.strip()  # Remove extra spaces
+                direction = direction.strip()
                 if direction == "Up":
                     self.up()
-                    print("Moving Up")
-                    time.sleep(1)
                 elif direction == "Down":
                     self.down()
-                    print("Moving Down")
-                    time.sleep(1)
                 elif direction == "Right":
                     self.right()
-                    print("Moving Right")
-                    time.sleep(1)
                 elif direction == "Left":
                     self.left()
-                    print("Moving Left")
-                    time.sleep(1)
-            # send a "completed" message to 
-
-            # self.send_message("completed")
-
-            self.notify("completed")
-            # print("Message Sent Back")
         except Exception as e:
             print("Error processing instructions:", e)
-    
 
-    def send_message(self, message):
-            
-            try:
-                self._ble.gatts_write(self._conn_handle, 0x2A56, message.encode())
-                print(f"Sent message: {message}")
-            except Exception as e:
-                print(f"Error sending message: {e}")
-    
-
+    def check_hall_sensor(self):
+        """Check the Hall effect sensor for magnetic field detection."""
+        hall_value = self.hall_sensor.value()
+        if hall_value < MAGNETIC_FIELD_THRESHOLD:
+            print(f"Magnetic field detected! Value: {hall_value}")
+            self.neo[0] = alert
+            self.neo.write()
+            self.buzzer.duty_u16(1000)
+            utime.sleep(0.5)  # Buzzer on for 0.5 seconds
+            self.buzzer.duty_u16(0)
+        else:
+            self.neo[0] = off
+            self.neo.write()
+            print(f"Value: {hall_value}")
 
 # Initialize BLECentral
 central = BLECentral()
@@ -207,4 +179,5 @@ central.start_scan()
 
 # Main loop
 while True:
-    time.sleep(1.5)
+    central.check_hall_sensor()
+    time.sleep(0.1)  # Check sensor at 10 Hz
