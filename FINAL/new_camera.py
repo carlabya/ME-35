@@ -119,6 +119,15 @@ while True:
             movement_instructions.append("Up")
         elif tag_id == 0 and 161 <= rotation_deg <= 300:
             movement_instructions.append("Down")
+            
+#    #Remove with Apriltags for testing
+#    if motor_ble.completed == False:
+#        motor_ble.notify("Up, Left, Down, Right, Up")  # Send the string
+#        motor_ble.completed = True
+
+    commands = ["Up", "Left", "Down", "Right"]
+    for command in commands:
+        motor_ble.notify(command)
 
     # Send each command individually
     if movement_instructions and motor_ble.completed == False:
